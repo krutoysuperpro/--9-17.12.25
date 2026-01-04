@@ -1,0 +1,122 @@
+import pandas as pd
+import numpy as np
+import tensorflow as tf
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+import joblib
+import os
+import pickle
+import warnings
+
+warnings.filterwarnings('ignore')
+
+
+def train_and_save_model(data_path, target_col, model_name):
+    """Обучает и сохраняет модель для оценки стоимости авто"""
+    df = pd.read_csv(data_path, encoding='utf-8')
+
+    X = df.drop(target_col, axis=1)
+    y = df[target_col]
+
+    categorical_cols = X.select_dtypes(include=['object']).columns.tolist()
+    numeric_cols = X.select_dtypes(include=['int64', 'float64']).columns.tolist()
+
+    preprocessor = ColumnTransformer([
+        ('num', StandardScaler(), numeric_cols),
+        ('cat', OneHotEncoder(handle_unknown='ignore', sparse_output=False), categorical_cols)
+    ])
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, shuffle=True
+    )
+
+    X_train_processed = preprocessor.fit_transform(X_train)
+    X_test_processed = preprocessor.transform(X_test)
+
+    input_dim = X_train_processed.shape[1]
+
+    model = tf.keras.Sequential([
+        tf.keras.layers.Input(shape=(input_dim,)),
+        tf.keras.layers.Dense(128, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.001)),
+        tf.keras.layers.Dropout(0.3),
+        tf.keras.layers.Dense(64, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.001)),
+        tf.keras.layers.Dropout(0.2),
+        tf.keras.layers.Dense(32, activation='relu'),
+        tf.keras.layers.Dense(16, activation='relu'),
+        tf.keras.layers.Dense(1)
+    ])
+
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+        loss='mean_squared_error',
+        metrics=['mae', 'mean_absolute_percentage_error']
+    )
+
+    early_stopping = tf.keras.callbacks.EarlyStopping(
+        monitor='val_loss',
+        patience=25,
+        restore_best_weights=True,
+        min_delta=50000
+    )
+
+    reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
+        monitor='val_loss',
+        factor=0.5,
+        patience=10,
+        min_lr=0.00001
+    )
+
+    history = model.fit(
+        X_train_processed, y_train,
+        validation_split=0.2,
+        epochs=300,
+        batch_size=32,
+        callbacks=[early_stopping, reduce_lr],
+        verbose=0
+    )
+
+    model.save(f'model/{model_name}_model.h5', save_format='h5')
+    joblib.dump(preprocessor, f'model/{model_name}_preprocessor.pkl')
+
+    column_info = {
+        'features': X.columns.tolist(),
+        'categorical': categorical_cols,
+        'numeric': numeric_cols,
+        'target': target_col,
+    }
+    with open(f'model/{model_name}_columns.pkl', 'wb') as f:
+        pickle.dump(column_info, f)
+
+    loss, mae, mape = model.evaluate(X_test_processed, y_test, verbose=0)
+    y_pred = model.predict(X_test_processed, verbose=0).flatten()
+
+    valid_idx = y_test.values != 0
+    if np.any(valid_idx):
+        mape_percent = np.mean(np.abs((y_test.values[valid_idx] - y_pred[valid_idx]) / y_test.values[valid_idx])) * 100
+    else:
+        mape_percent = 0
+
+    errors = y_pred - y_test.values
+    error_stats = {
+        'mean_error': errors.mean(),
+        'std_error': errors.std(),
+    }
+
+    with open(f'model/{model_name}_stats.pkl', 'wb') as f:
+        pickle.dump(error_stats, f)
+
+    return model, preprocessor
+
+
+os.makedirs('model', exist_ok=True)
+
+try:
+    car_model, car_preprocessor = train_and_save_model(
+        'data/cars_dataset.csv',
+        'price',
+        'car'
+    )
+except Exception as e:
+    exit()
+print("✅ Модель обучена и сохранена в папку 'model/'")
