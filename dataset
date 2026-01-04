@@ -1,0 +1,110 @@
+import pandas as pd
+import numpy as np
+import os
+
+os.makedirs('data', exist_ok=True)
+os.makedirs('model', exist_ok=True)
+
+BRANDS = ['Toyota', 'Honda', 'Ford', 'BMW', 'Mercedes', 'Audi', 'Volkswagen', 'Hyundai', 'Kia', 'Nissan']
+MODELS = {
+    'Toyota': ['Camry', 'Corolla', 'RAV4', 'Land Cruiser', 'Prius'],
+    'Honda': ['Civic', 'Accord', 'CR-V', 'Pilot'],
+    'Ford': ['Focus', 'Fusion', 'Explorer', 'F-150'],
+    'BMW': ['3 Series', '5 Series', 'X5', 'X3'],
+    'Mercedes': ['C-Class', 'E-Class', 'GLC', 'S-Class'],
+    'Audi': ['A4', 'A6', 'Q5', 'Q7'],
+    'Volkswagen': ['Golf', 'Passat', 'Tiguan', 'Polo'],
+    'Hyundai': ['Solaris', 'Elantra', 'Tucson', 'Santa Fe'],
+    'Kia': ['Rio', 'Optima', 'Sportage', 'Sorento'],
+    'Nissan': ['Sentra', 'Altima', 'Qashqai', 'X-Trail']
+}
+
+n_samples = 1500
+
+# Исправленные вероятности (сумма = 1.0)
+brand_probs = [0.18, 0.15, 0.12, 0.10, 0.09, 0.08, 0.07, 0.06, 0.05, 0.10]  # Последняя изменена с 0.04 на 0.10
+
+data = {
+    'brand': np.random.choice(BRANDS, n_samples, p=brand_probs),
+    'year': np.random.randint(2005, 2024, n_samples),
+    'mileage': np.random.uniform(10, 300, n_samples).round(0),
+    'engine_capacity': np.random.choice([1.4, 1.6, 1.8, 2.0, 2.5, 3.0, 3.5, 4.0], n_samples, p=[0.1, 0.25, 0.2, 0.2, 0.1, 0.08, 0.05, 0.02]),
+    'transmission': np.random.choice(['Автомат', 'Механика', 'Робот', 'Вариатор'], n_samples, p=[0.6, 0.25, 0.1, 0.05]),
+    'drive_type': np.random.choice(['Передний', 'Задний', 'Полный'], n_samples, p=[0.6, 0.2, 0.2]),
+    'body_type': np.random.choice(['Седан', 'Хэтчбек', 'Внедорожник', 'Универсал', 'Купе', 'Минивен'], n_samples, p=[0.35, 0.25, 0.2, 0.1, 0.05, 0.05]),
+    'fuel_type': np.random.choice(['Бензин', 'Дизель', 'Гибрид', 'Электро'], n_samples, p=[0.8, 0.15, 0.04, 0.01]),
+    'color': np.random.choice(['Черный', 'Белый', 'Серый', 'Серебристый', 'Синий', 'Красный'], n_samples, p=[0.2, 0.25, 0.2, 0.15, 0.1, 0.1]),
+    'condition': np.random.choice(['Отличное', 'Хорошее', 'Удовлетворительное', 'Требует ремонта'], n_samples, p=[0.2, 0.5, 0.25, 0.05]),
+    'owners_count': np.random.choice([1, 2, 3, 4, 5], n_samples, p=[0.5, 0.3, 0.12, 0.05, 0.03]),
+    'accidents': np.random.choice([0, 1], n_samples, p=[0.7, 0.3]),
+}
+
+data['model'] = [np.random.choice(MODELS[brand]) for brand in data['brand']]
+
+brand_coef = {
+    'Toyota': 1.15,
+    'Honda': 1.10,
+    'Ford': 1.0,
+    'BMW': 1.3,
+    'Mercedes': 1.35,
+    'Audi': 1.25,
+    'Volkswagen': 1.05,
+    'Hyundai': 0.95,
+    'Kia': 0.93,
+    'Nissan': 0.98
+}
+
+transmission_coef = {
+    'Автомат': 1.15,
+    'Механика': 1.0,
+    'Робот': 1.05,
+    'Вариатор': 1.08
+}
+
+drive_type_coef = {
+    'Передний': 1.0,
+    'Задний': 1.05,
+    'Полный': 1.12
+}
+
+condition_coef = {
+    'Отличное': 1.15,
+    'Хорошее': 1.0,
+    'Удовлетворительное': 0.85,
+    'Требует ремонта': 0.65
+}
+
+current_year = 2024
+data['age'] = current_year - data['year']
+
+base_price = (
+    (current_year - data['year']) * (-50000) +
+    (300 - data['mileage']) * 2000 +
+    data['engine_capacity'] * 200000 +
+    np.where(data['fuel_type'] == 'Электро', 300000,
+             np.where(data['fuel_type'] == 'Гибрид', 150000, 0))
+)
+
+data['brand_coef'] = [brand_coef[brand] for brand in data['brand']]
+data['transmission_coef'] = [transmission_coef[t] for t in data['transmission']]
+data['drive_type_coef'] = [drive_type_coef[d] for d in data['drive_type']]
+data['condition_coef'] = [condition_coef[c] for c in data['condition']]
+
+data['price'] = (
+    base_price *
+    data['brand_coef'] *
+    data['transmission_coef'] *
+    data['drive_type_coef'] *
+    data['condition_coef'] *
+    (1 - data['accidents'] * 0.15) *
+    (1 - (data['owners_count'] - 1) * 0.03) *
+    np.random.uniform(0.9, 1.1, n_samples)
+)
+
+data['price'] = np.round(data['price'] / 10000) * 10000
+data['price'] = np.clip(data['price'], 50000, 5000000)
+
+df_cars = pd.DataFrame(data)
+df_cars = df_cars.drop(['brand_coef', 'transmission_coef', 'drive_type_coef', 'condition_coef', 'age'], axis=1)
+
+df_cars.to_csv('data/cars_dataset.csv', index=False, encoding='utf-8')
