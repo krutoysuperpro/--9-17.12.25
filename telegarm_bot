@@ -1,0 +1,608 @@
+import telebot
+from telebot import types
+import pandas as pd
+import tensorflow as tf
+import joblib
+import pickle
+import os
+import time
+
+from config import BOT_TOKEN
+
+os.makedirs('model', exist_ok=True)
+
+try:
+    required_files = [
+        'model/car_model.h5',
+        'model/car_preprocessor.pkl',
+        'model/car_columns.pkl',
+        'model/car_stats.pkl'
+    ]
+
+    missing_files = [f for f in required_files if not os.path.exists(f)]
+    if missing_files:
+        exit()
+
+    car_model = tf.keras.models.load_model('model/car_model.h5')
+    car_preprocessor = joblib.load('model/car_preprocessor.pkl')
+
+    with open('model/car_columns.pkl', 'rb') as f:
+        car_columns = pickle.load(f)
+
+    with open('model/car_stats.pkl', 'rb') as f:
+        car_stats = pickle.load(f)
+
+except Exception as e:
+    exit()
+
+bot = telebot.TeleBot(BOT_TOKEN)
+
+BRANDS = ['Toyota', 'Honda', 'Ford', 'BMW', 'Mercedes', 'Audi', 'Volkswagen', 'Hyundai', 'Kia', 'Nissan']
+MODELS = {
+    'Toyota': ['Camry', 'Corolla', 'RAV4', 'Land Cruiser', 'Prius'],
+    'Honda': ['Civic', 'Accord', 'CR-V', 'Pilot'],
+    'Ford': ['Focus', 'Fusion', 'Explorer', 'F-150'],
+    'BMW': ['3 Series', '5 Series', 'X5', 'X3'],
+    'Mercedes': ['C-Class', 'E-Class', 'GLC', 'S-Class'],
+    'Audi': ['A4', 'A6', 'Q5', 'Q7'],
+    'Volkswagen': ['Golf', 'Passat', 'Tiguan', 'Polo'],
+    'Hyundai': ['Solaris', 'Elantra', 'Tucson', 'Santa Fe'],
+    'Kia': ['Rio', 'Optima', 'Sportage', 'Sorento'],
+    'Nissan': ['Sentra', 'Altima', 'Qashqai', 'X-Trail']
+}
+TRANSMISSIONS = ['Автомат', 'Механика', 'Робот', 'Вариатор']
+DRIVE_TYPES = ['Передний', 'Задний', 'Полный']
+BODY_TYPES = ['Седан', 'Хэтчбек', 'Внедорожник', 'Универсал', 'Купе', 'Минивен']
+FUEL_TYPES = ['Бензин', 'Дизель', 'Гибрид', 'Электро']
+COLORS = ['Черный', 'Белый', 'Серый', 'Серебристый', 'Синий', 'Красный']
+CONDITIONS = ['Отличное', 'Хорошее', 'Удовлетворительное', 'Требует ремонта']
+
+user_data = {}
+
+
+def adjust_prediction(prediction, data):
+    brand = data.get('brand', '')
+    year = data.get('year', 2020)
+    mileage = data.get('mileage', 100)
+    condition = data.get('condition', 'Хорошее')
+
+    brand_coefs = {
+        'Toyota': 1.1, 'Honda': 1.05, 'Ford': 1.0, 'BMW': 1.15,
+        'Mercedes': 1.2, 'Audi': 1.12, 'Volkswagen': 1.03,
+        'Hyundai': 0.95, 'Kia': 0.93, 'Nissan': 0.98
+    }
+    if brand in brand_coefs:
+        prediction *= brand_coefs[brand]
+
+    current_year = 2024
+    age = current_year - year
+    if age > 15:
+        prediction *= 0.7
+    elif age > 10:
+        prediction *= 0.85
+    elif age > 5:
+        prediction *= 0.95
+
+    if mileage > 200:
+        prediction *= 0.8
+    elif mileage > 150:
+        prediction *= 0.85
+    elif mileage > 100:
+        prediction *= 0.9
+    elif mileage > 50:
+        prediction *= 0.95
+
+    condition_coefs = {
+        'Отличное': 1.1,
+        'Хорошее': 1.0,
+        'Удовлетворительное': 0.85,
+        'Требует ремонта': 0.6
+    }
+    if condition in condition_coefs:
+        prediction *= condition_coefs[condition]
+
+    if data.get('accidents') == 1:
+        prediction *= 0.85
+
+    owners = data.get('owners_count', 1)
+    if owners > 1:
+        prediction *= (1 - (owners - 1) * 0.05)
+
+    if prediction < 100000:
+        prediction = round(prediction / 10000) * 10000
+    else:
+        prediction = round(prediction / 50000) * 50000
+
+    prediction = max(prediction, 50000)
+    prediction = min(prediction, 5000000)
+
+    return prediction
+
+
+def main_keyboard():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add(
+        types.KeyboardButton("🚗 Оценить авто"),
+        types.KeyboardButton("ℹ️ Помощь")
+    )
+    return markup
+
+
+def brand_keyboard():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
+    buttons = [types.KeyboardButton(brand) for brand in BRANDS]
+    markup.add(*buttons)
+    markup.add(types.KeyboardButton("🔙 Назад"))
+    return markup
+
+
+def model_keyboard(brand):
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    if brand in MODELS:
+        buttons = [types.KeyboardButton(model) for model in MODELS[brand]]
+        markup.add(*buttons)
+    markup.add(types.KeyboardButton("🔙 Назад"))
+    return markup
+
+
+def transmission_keyboard():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    buttons = [types.KeyboardButton(trans) for trans in TRANSMISSIONS]
+    markup.add(*buttons)
+    markup.add(types.KeyboardButton("🔙 Назад"))
+    return markup
+
+
+def drive_keyboard():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    buttons = [types.KeyboardButton(drive) for drive in DRIVE_TYPES]
+    markup.add(*buttons)
+    markup.add(types.KeyboardButton("🔙 Назад"))
+    return markup
+
+
+def body_keyboard():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    buttons = [types.KeyboardButton(body) for body in BODY_TYPES]
+    markup.add(*buttons)
+    markup.add(types.KeyboardButton("🔙 Назад"))
+    return markup
+
+
+def fuel_keyboard():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    buttons = [types.KeyboardButton(fuel) for fuel in FUEL_TYPES]
+    markup.add(*buttons)
+    markup.add(types.KeyboardButton("🔙 Назад"))
+    return markup
+
+
+def condition_keyboard():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    buttons = [types.KeyboardButton(cond) for cond in CONDITIONS]
+    markup.add(*buttons)
+    markup.add(types.KeyboardButton("🔙 Назад"))
+    return markup
+
+
+def yes_no_keyboard():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add(
+        types.KeyboardButton("✅ Да"),
+        types.KeyboardButton("❌ Нет"),
+        types.KeyboardButton("🔙 Назад")
+    )
+    return markup
+
+
+def owners_keyboard():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
+    markup.add(
+        types.KeyboardButton("1"),
+        types.KeyboardButton("2"),
+        types.KeyboardButton("3"),
+        types.KeyboardButton("4"),
+        types.KeyboardButton("5"),
+        types.KeyboardButton("🔙 Назад")
+    )
+    return markup
+
+
+def engine_keyboard():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=4)
+    markup.add(
+        types.KeyboardButton("1.4"),
+        types.KeyboardButton("1.6"),
+        types.KeyboardButton("1.8"),
+        types.KeyboardButton("2.0"),
+        types.KeyboardButton("2.5"),
+        types.KeyboardButton("3.0"),
+        types.KeyboardButton("3.5"),
+        types.KeyboardButton("4.0"),
+        types.KeyboardButton("🔙 Назад")
+    )
+    return markup
+
+
+@bot.message_handler(commands=['start'])
+def start(message):
+    welcome = (
+        "🚗 *Оценка стоимости автомобилей*\n\n"
+        "Нажмите '🚗 Оценить авто' для расчета"
+    )
+    bot.send_message(message.chat.id, welcome, parse_mode='Markdown', reply_markup=main_keyboard())
+    user_data[message.chat.id] = {'step': 0}
+
+
+@bot.message_handler(func=lambda msg: msg.text == "ℹ️ Помощь")
+def help_command(message):
+    help_text = (
+        "1. Нажмите '🚗 Оценить авто'\n"
+        "2. Введите параметры автомобиля\n"
+        "3. Получите оценку стоимости\n\n"
+        "Оценка является ориентировочной"
+    )
+    bot.send_message(message.chat.id, help_text, parse_mode='Markdown')
+
+
+@bot.message_handler(func=lambda msg: msg.text == "🚗 Оценить авто")
+def start_calculation(message):
+    chat_id = message.chat.id
+
+    user_data[chat_id] = {
+        'step': 1,
+        'data': {},
+        'current_brand': None
+    }
+
+    bot.send_message(chat_id, "Выберите марку:", reply_markup=brand_keyboard())
+
+
+@bot.message_handler(func=lambda msg: msg.chat.id in user_data and user_data[msg.chat.id]['step'] == 1)
+def step1_brand(message):
+    chat_id = message.chat.id
+
+    if message.text == "🔙 Назад":
+        bot.send_message(chat_id, "Главное меню:", reply_markup=main_keyboard())
+        user_data.pop(chat_id, None)
+        return
+
+    if message.text not in BRANDS:
+        bot.send_message(chat_id, "Выберите марку из списка:", reply_markup=brand_keyboard())
+        return
+
+    user_data[chat_id]['data']['brand'] = message.text
+    user_data[chat_id]['current_brand'] = message.text
+    user_data[chat_id]['step'] = 2
+
+    bot.send_message(chat_id, f"Выберите модель {message.text}:", reply_markup=model_keyboard(message.text))
+
+
+@bot.message_handler(func=lambda msg: msg.chat.id in user_data and user_data[msg.chat.id]['step'] == 2)
+def step2_model(message):
+    chat_id = message.chat.id
+    current_brand = user_data[chat_id]['current_brand']
+
+    if message.text == "🔙 Назад":
+        user_data[chat_id]['step'] = 1
+        bot.send_message(chat_id, "Выберите марку:", reply_markup=brand_keyboard())
+        return
+
+    if current_brand in MODELS and message.text not in MODELS[current_brand]:
+        bot.send_message(chat_id, f"Выберите модель {current_brand} из списка:",
+                         reply_markup=model_keyboard(current_brand))
+        return
+
+    user_data[chat_id]['data']['model'] = message.text
+    user_data[chat_id]['step'] = 3
+
+    bot.send_message(chat_id, "Введите год выпуска:", reply_markup=types.ReplyKeyboardRemove())
+
+
+@bot.message_handler(func=lambda msg: msg.chat.id in user_data and user_data[msg.chat.id]['step'] == 3)
+def step3_year(message):
+    chat_id = message.chat.id
+
+    try:
+        year = int(message.text)
+        current_year = 2024
+        if year < 1990 or year > current_year:
+            bot.send_message(chat_id, f"Введите год от 1990 до {current_year}:")
+            return
+    except:
+        bot.send_message(chat_id, "Введите целое число:")
+        return
+
+    user_data[chat_id]['data']['year'] = year
+    user_data[chat_id]['step'] = 4
+
+    bot.send_message(chat_id, "Введите пробег (тыс. км):")
+
+
+@bot.message_handler(func=lambda msg: msg.chat.id in user_data and user_data[msg.chat.id]['step'] == 4)
+def step4_mileage(message):
+    chat_id = message.chat.id
+
+    try:
+        mileage = float(message.text.replace(',', '.'))
+        if mileage < 0 or mileage > 500:
+            bot.send_message(chat_id, "Введите пробег от 0 до 500 тыс. км:")
+            return
+    except:
+        bot.send_message(chat_id, "Введите число:")
+        return
+
+    user_data[chat_id]['data']['mileage'] = mileage
+    user_data[chat_id]['step'] = 5
+
+    bot.send_message(chat_id, "Выберите объем двигателя:", reply_markup=engine_keyboard())
+
+
+@bot.message_handler(func=lambda msg: msg.chat.id in user_data and user_data[msg.chat.id]['step'] == 5)
+def step5_engine(message):
+    chat_id = message.chat.id
+
+    if message.text == "🔙 Назад":
+        user_data[chat_id]['step'] = 4
+        bot.send_message(chat_id, "Введите пробег:")
+        return
+
+    try:
+        engine = float(message.text)
+        if engine < 1.0 or engine > 5.0:
+            bot.send_message(chat_id, "Выберите объем из списка:", reply_markup=engine_keyboard())
+            return
+    except:
+        bot.send_message(chat_id, "Выберите объем из списка:", reply_markup=engine_keyboard())
+        return
+
+    user_data[chat_id]['data']['engine_capacity'] = engine
+    user_data[chat_id]['step'] = 6
+
+    bot.send_message(chat_id, "Выберите коробку передач:", reply_markup=transmission_keyboard())
+
+
+@bot.message_handler(func=lambda msg: msg.chat.id in user_data and user_data[msg.chat.id]['step'] == 6)
+def step6_transmission(message):
+    chat_id = message.chat.id
+
+    if message.text == "🔙 Назад":
+        user_data[chat_id]['step'] = 5
+        bot.send_message(chat_id, "Выберите объем двигателя:", reply_markup=engine_keyboard())
+        return
+
+    if message.text not in TRANSMISSIONS:
+        bot.send_message(chat_id, "Выберите тип коробки из списка:", reply_markup=transmission_keyboard())
+        return
+
+    user_data[chat_id]['data']['transmission'] = message.text
+    user_data[chat_id]['step'] = 7
+
+    bot.send_message(chat_id, "Выберите тип привода:", reply_markup=drive_keyboard())
+
+
+@bot.message_handler(func=lambda msg: msg.chat.id in user_data and user_data[msg.chat.id]['step'] == 7)
+def step7_drive(message):
+    chat_id = message.chat.id
+
+    if message.text == "🔙 Назад":
+        user_data[chat_id]['step'] = 6
+        bot.send_message(chat_id, "Выберите коробку передач:", reply_markup=transmission_keyboard())
+        return
+
+    if message.text not in DRIVE_TYPES:
+        bot.send_message(chat_id, "Выберите тип привода из списка:", reply_markup=drive_keyboard())
+        return
+
+    user_data[chat_id]['data']['drive_type'] = message.text
+    user_data[chat_id]['step'] = 8
+
+    bot.send_message(chat_id, "Выберите тип кузова:", reply_markup=body_keyboard())
+
+
+@bot.message_handler(func=lambda msg: msg.chat.id in user_data and user_data[msg.chat.id]['step'] == 8)
+def step8_body(message):
+    chat_id = message.chat.id
+
+    if message.text == "🔙 Назад":
+        user_data[chat_id]['step'] = 7
+        bot.send_message(chat_id, "Выберите тип привода:", reply_markup=drive_keyboard())
+        return
+
+    if message.text not in BODY_TYPES:
+        bot.send_message(chat_id, "Выберите тип кузова из списка:", reply_markup=body_keyboard())
+        return
+
+    user_data[chat_id]['data']['body_type'] = message.text
+    user_data[chat_id]['step'] = 9
+
+    bot.send_message(chat_id, "Выберите тип топлива:", reply_markup=fuel_keyboard())
+
+
+@bot.message_handler(func=lambda msg: msg.chat.id in user_data and user_data[msg.chat.id]['step'] == 9)
+def step9_fuel(message):
+    chat_id = message.chat.id
+
+    if message.text == "🔙 Назад":
+        user_data[chat_id]['step'] = 8
+        bot.send_message(chat_id, "Выберите тип кузова:", reply_markup=body_keyboard())
+        return
+
+    if message.text not in FUEL_TYPES:
+        bot.send_message(chat_id, "Выберите тип топлива из списка:", reply_markup=fuel_keyboard())
+        return
+
+    user_data[chat_id]['data']['fuel_type'] = message.text
+    user_data[chat_id]['step'] = 10
+
+    bot.send_message(chat_id, "Выберите состояние:", reply_markup=condition_keyboard())
+
+
+@bot.message_handler(func=lambda msg: msg.chat.id in user_data and user_data[msg.chat.id]['step'] == 10)
+def step10_condition(message):
+    chat_id = message.chat.id
+
+    if message.text == "🔙 Назад":
+        user_data[chat_id]['step'] = 9
+        bot.send_message(chat_id, "Выберите тип топлива:", reply_markup=fuel_keyboard())
+        return
+
+    if message.text not in CONDITIONS:
+        bot.send_message(chat_id, "Выберите состояние из списка:", reply_markup=condition_keyboard())
+        return
+
+    user_data[chat_id]['data']['condition'] = message.text
+    user_data[chat_id]['step'] = 11
+
+    bot.send_message(chat_id, "Были ли ДТП?", reply_markup=yes_no_keyboard())
+
+
+@bot.message_handler(func=lambda msg: msg.chat.id in user_data and user_data[msg.chat.id]['step'] == 11)
+def step11_accidents(message):
+    chat_id = message.chat.id
+
+    if message.text == "🔙 Назад":
+        user_data[chat_id]['step'] = 10
+        bot.send_message(chat_id, "Выберите состояние:", reply_markup=condition_keyboard())
+        return
+
+    if message.text not in ["✅ Да", "❌ Нет"]:
+        bot.send_message(chat_id, "Выберите 'Да' или 'Нет':", reply_markup=yes_no_keyboard())
+        return
+
+    user_data[chat_id]['data']['accidents'] = 1 if message.text == "✅ Да" else 0
+    user_data[chat_id]['step'] = 12
+
+    bot.send_message(chat_id, "Сколько было владельцев?", reply_markup=owners_keyboard())
+
+
+@bot.message_handler(func=lambda msg: msg.chat.id in user_data and user_data[msg.chat.id]['step'] == 12)
+def step12_owners(message):
+    chat_id = message.chat.id
+
+    if message.text == "🔙 Назад":
+        user_data[chat_id]['step'] = 11
+        bot.send_message(chat_id, "Были ли ДТП?", reply_markup=yes_no_keyboard())
+        return
+
+    if message.text not in ['1', '2', '3', '4', '5']:
+        bot.send_message(chat_id, "Выберите количество владельцев:", reply_markup=owners_keyboard())
+        return
+
+    user_data[chat_id]['data']['owners_count'] = int(message.text)
+    user_data[chat_id]['data']['color'] = 'Черный'
+
+    make_prediction(chat_id)
+
+
+def make_prediction(chat_id):
+    if chat_id not in user_data:
+        bot.send_message(chat_id, "Ошибка данных.", reply_markup=main_keyboard())
+        return
+
+    data = user_data[chat_id]['data']
+
+    try:
+        msg = bot.send_message(chat_id, "Расчет стоимости...", parse_mode='Markdown')
+        message_to_delete_id = msg.message_id
+
+        df = pd.DataFrame([{
+            'brand': data.get('brand', 'Toyota'),
+            'model': data.get('model', 'Camry'),
+            'year': data.get('year', 2018),
+            'mileage': data.get('mileage', 60),
+            'engine_capacity': data.get('engine_capacity', 2.0),
+            'transmission': data.get('transmission', 'Автомат'),
+            'drive_type': data.get('drive_type', 'Передний'),
+            'body_type': data.get('body_type', 'Седан'),
+            'fuel_type': data.get('fuel_type', 'Бензин'),
+            'color': data.get('color', 'Черный'),
+            'condition': data.get('condition', 'Хорошее'),
+            'owners_count': data.get('owners_count', 1),
+            'accidents': data.get('accidents', 0)
+        }])
+
+        processed = car_preprocessor.transform(df)
+        prediction = car_model.predict(processed, verbose=0)[0][0]
+
+        final_price = adjust_prediction(prediction, data)
+        result = format_prediction_result(data, final_price)
+
+        try:
+            bot.delete_message(chat_id, message_to_delete_id)
+        except Exception:
+            pass
+
+        bot.send_message(chat_id, result, parse_mode='Markdown', reply_markup=main_keyboard())
+
+    except Exception as e:
+        error_msg = f"Произошла ошибка при расчете стоимости. Пожалуйста, попробуйте еще раз."
+        bot.send_message(chat_id, error_msg, parse_mode='Markdown', reply_markup=main_keyboard())
+
+    if chat_id in user_data:
+        user_data.pop(chat_id, None)
+
+
+def format_prediction_result(data, price):
+    current_year = 2024
+    age = current_year - data.get('year', current_year)
+
+    lower_bound = round(price * 0.85)
+    upper_bound = round(price * 1.15)
+
+    result = (
+        f"🚗 *Оценка стоимости*\n"
+        f"📋 *Параметры:*\n"
+        f"• {data.get('brand')} {data.get('model')}\n"
+        f"• Год: {data.get('year')} ({age} лет)\n"
+        f"• Пробег: {data.get('mileage'):.0f} тыс. км\n"
+        f"• Двигатель: {data.get('engine_capacity')} л\n"
+        f"• Коробка: {data.get('transmission')}\n"
+        f"• Привод: {data.get('drive_type')}\n"
+        f"• Состояние: {data.get('condition')}\n"
+        f"• Владельцев: {data.get('owners_count')}\n"
+        f"• ДТП: {'Да' if data.get('accidents') else 'Нет'}\n\n"
+        f"💰 *Оценка стоимости:*\n"
+        f"`{price:,.0f} руб`\n\n"
+        f"📊 *Рыночный диапазон:*\n"
+        f"• От: {lower_bound:,.0f} руб\n"
+        f"• До: {upper_bound:,.0f} руб\n"
+    )
+
+    if data.get('accidents'):
+        result += "⚠️ Автомобиль был в ДТП\n"
+
+    if age > 10:
+        result += "⚠️ Возраст автомобиля более 10 лет\n"
+
+    if data.get('mileage') > 150:
+        result += "⚠️ Большой пробег\n"
+
+    result += "\n_Оценка является ориентировочной_"
+
+    return result
+
+
+@bot.message_handler(func=lambda msg: True)
+def handle_all_messages(message):
+    chat_id = message.chat.id
+
+    if chat_id in user_data:
+        bot.send_message(chat_id, "Используйте кнопки для выбора")
+    else:
+        bot.send_message(chat_id,
+                         "Используйте кнопки меню",
+                         reply_markup=main_keyboard()
+                         )
+
+
+print("✅ Бот запущен!")
+
+while True:
+    try:
+        print("Запуск polling...")
+        bot.polling(none_stop=True, interval=0)
+    except ConnectionError:
+        time.sleep(10)
+    except Exception:
+        time.sleep(5)
